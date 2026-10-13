@@ -44,6 +44,7 @@ API 응답은 `{header, body}`가 최상위에 바로 옵니다(2026-10-13 확�
 | `v1/bins/{코드}.json` | `{schema, generatedAt, sidoCode, count, items:[{binId, instlPlcNm, ctpvNm, sggNm, lctnRoadNm, lctnLotnoAddr, lat, lot, actlPstn, mngInstNm, mngInstTelno, crtrYmd, insttCode, insttNm}]}` 빈 값은 뺍니다 |
 | `v1/points.json` | `{schema, generatedAt, sidos:{코드:[[위도, 경도], …]}}` 소수 5자리. 앱이 위치를 보내지 않고 기기에서 가까운 시도를 고릅니다 |
 | `index.html` | 사람이 보는 목록과 출처 |
+| `privacy.html` | 앱 개인정보처리방침의 웹 사본(Play Console에 넣는 주소). `pages/privacy.html`을 빌드마다 복사합니다. 원문은 앱의 `public/privacy.html`이고, 다른 점은 앱 안에서만 쓰는 ‘앱으로 돌아가기’ 링크가 없는 것뿐입니다(앱 테스트가 비교). 고치면 `FORCE=1`로 배포합니다 |
 
 데이터가 없는 시도(예: 제주, 2026-10)는 파일이 없고 앱은 404를 ‘데이터 없음’으로 읽습니다. 형식을 바꾸면 `v2/`에 올리고 `v1/`은 옛 앱을 위해 남깁니다.
 

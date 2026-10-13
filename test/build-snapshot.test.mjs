@@ -44,7 +44,12 @@ describe("build-snapshot (샘플 파일)", () => {
 
       const points = readJson(outDir, "v1/points.json");
       assert.equal(points.sidos["31"].length, 14);
-      assert.match(readFileSync(join(outDir, "index.html"), "utf8"), /데이터 없음: .*제주특별자치도/);
+      const index = readFileSync(join(outDir, "index.html"), "utf8");
+      assert.match(index, /데이터 없음: .*제주특별자치도/);
+      assert.match(index, /href="privacy.html"/);
+      const privacy = readFileSync(join(outDir, "privacy.html"), "utf8");
+      assert.match(privacy, /kr\.ulsan\.ldh\.pharmabin\) 개인정보처리방침/);
+      assert.doesNotMatch(privacy, /앱으로 돌아가기/, "웹 사본에는 앱 안에서만 쓰는 돌아가기 링크가 없다");
     } finally {
       rmSync(outDir, { recursive: true, force: true });
     }

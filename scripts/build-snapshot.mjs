@@ -12,7 +12,7 @@
  *   MIN_ROWS                건수 하한(기본 3000). 샘플 빌드에서만 0으로 낮춘다.
  *   OUT_DIR                 기본 site
  */
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
   API_URL,
@@ -36,6 +36,11 @@ const outDir = resolve(process.env.OUT_DIR || "site");
 const pagesBaseUrl = (process.env.PAGES_BASE_URL || "").replace(/\/+$/, "");
 const minimumRows = process.env.MIN_ROWS != null && process.env.MIN_ROWS !== "" ? Number(process.env.MIN_ROWS) : 3000;
 const REQUEST_TIMEOUT_MS = 30_000;
+/**
+ * 앱 개인정보처리방침의 웹 사본(Play Console 에 넣는 주소). 배포는 site/ 로 gh-pages 를 매번 새로 만들므로
+ * 빌드마다 함께 넣어야 지워지지 않는다. 원문은 앱의 public/privacy.html 이고, 앱 테스트가 두 파일을 비교한다.
+ */
+const PRIVACY_PAGE = resolve(import.meta.dirname, "../pages/privacy.html");
 const MAX_ATTEMPTS = 4;
 
 /**
@@ -181,7 +186,7 @@ function indexHtml(meta) {
     <p>「폐의약품 수거함 찾기」 앱(kr.ulsan.ldh.pharmabin)이 읽는 정적 파일입니다. 원본 내용이 바뀐 날에만 새로 올립니다.</p>
     <p>출처: 공공데이터포털 <a href="${SOURCE_URL}">전국폐의약품수거함표준데이터</a>(각 지자체 제공, 월 1회 병합). 이설·철거가 늦게 반영될 수 있으니 방문 전 현장을 확인하세요.</p>
     <p>생성: <code>${meta.generatedAt}</code> · 수거함 ${meta.bins.count}곳(좌표 ${meta.bins.withCoordinates}곳) · 최신 데이터 기준일 <code>${meta.bins.latestDataDate || "-"}</code></p>
-    <p><a href="v1/meta.json">v1/meta.json</a> · <a href="v1/points.json">v1/points.json</a></p>
+    <p><a href="v1/meta.json">v1/meta.json</a> · <a href="v1/points.json">v1/points.json</a> · <a href="privacy.html">앱 개인정보처리방침</a></p>
     <ul>
       ${sidoLinks}
     </ul>
@@ -212,6 +217,7 @@ async function main() {
   writeJson("v1/points.json", buildPointsFile(bySido, generatedAt));
   writeJson("v1/meta.json", meta);
   writeText("index.html", indexHtml(meta));
+  copyFileSync(PRIVACY_PAGE, resolve(outDir, "privacy.html"));
 
   log(
     `수거함 ${meta.bins.count}곳 (${bySido.size}개 시도, 좌표 ${meta.bins.withCoordinates}곳, 위경도 뒤바뀜 보정 ${stats.swappedCoordinates}건, `
