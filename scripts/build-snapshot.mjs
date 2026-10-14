@@ -21,12 +21,13 @@ import {
   SCHEMA_VERSION,
   SIDOS,
   SOURCE_URL,
-  SUPPLEMENTS,
   assertPlausibleCount,
   buildMeta,
   buildPointsFile,
+  dateFromContentDisposition,
   decodeText,
   fileDataPageUrl,
+  findFileDataDate,
   findFileDownloadUrl,
   groupBinsBySido,
   mergeSupplements,
@@ -36,6 +37,7 @@ import {
   parseSupplementFile,
   resolveSidoCode
 } from "./snapshot-lib.mjs";
+import { SUPPLEMENTS } from "./supplements.mjs";
 
 const serviceKey = normalizeServiceKey(process.env.DATA_GO_KR_SERVICE_KEY);
 const inputFile = (process.env.INPUT_FILE || "").trim();
@@ -123,7 +125,7 @@ async function fetchAll() {
 }
 
 /** 인증키가 들지 않는 공개 주소(파일데이터 페이지·다운로드·직전 배포본)를 받는다. */
-async function fetchBytes(url) {
+async function fetchPublic(url) {
   let lastError;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
@@ -131,7 +133,7 @@ async function fetchBytes(url) {
       if (!response.ok) {
         throw Object.assign(new Error(`HTTP ${response.status}`), { status: response.status });
       }
-      return new Uint8Array(await response.arrayBuffer());
+      return { bytes: new Uint8Array(await response.arrayBuffer()), disposition: response.headers.get("content-disposition") ?? "" };
     } catch (error) {
       lastError = error;
       if (error?.status === 404) {
@@ -145,17 +147,21 @@ async function fetchBytes(url) {
   throw lastError;
 }
 
+/** 직전 배포본의 시도 파일. 보조 파일 여러 개가 같은 시도를 쓰므로 한 번만 받는다. 못 읽으면 빈 목록. */
+const previousBins = new Map();
+
 /** 직전 배포본에서 그 보조 파일에서 온 행. 없거나 못 읽으면 빈 배열. */
 async function previousSupplementRows(source) {
   if (!pagesBaseUrl) {
     return [];
   }
-  try {
-    const file = JSON.parse(decodeText(await fetchBytes(`${pagesBaseUrl}/v1/bins/${resolveSidoCode(source)}.json`)));
-    return (file?.items ?? []).filter((item) => item.fileDataId === source.fileDataId);
-  } catch {
-    return [];
+  const sidoCode = resolveSidoCode(source);
+  if (!previousBins.has(sidoCode)) {
+    previousBins.set(sidoCode, fetchPublic(`${pagesBaseUrl}/v1/bins/${sidoCode}.json`)
+      .then(({ bytes }) => JSON.parse(decodeText(bytes))?.items ?? [])
+      .catch(() => []));
   }
+  return (await previousBins.get(sidoCode)).filter((item) => item.fileDataId === source.fileDataId);
 }
 
 /**
@@ -164,12 +170,15 @@ async function previousSupplementRows(source) {
  */
 async function loadSupplement(source) {
   try {
-    const page = decodeText(await fetchBytes(fileDataPageUrl(source.fileDataId)));
+    const page = decodeText((await fetchPublic(fileDataPageUrl(source.fileDataId))).bytes);
     const url = findFileDownloadUrl(page);
     if (!url) {
       throw new Error("데이터 페이지에서 다운로드 주소를 찾지 못했습니다.");
     }
-    const rows = parseSupplementFile(source, decodeText(await fetchBytes(url)));
+    const file = await fetchPublic(url);
+    // 기준일 열이 없는 파일은 파일 이름의 날짜, 그것도 없으면 페이지 제목의 날짜를 쓴다.
+    const fallbackDate = dateFromContentDisposition(file.disposition) || findFileDataDate(page);
+    const rows = parseSupplementFile(source, decodeText(file.bytes), { fallbackDate });
     if (rows.length === 0) {
       throw new Error("파일에 행이 없습니다.");
     }
@@ -235,10 +244,13 @@ function supplementsHtml(meta) {
   if (used.length === 0) {
     return "";
   }
-  const links = used
-    .map((entry) => `<a href="${fileDataPageUrl(entry.fileDataId)}">${escapeHtml(entry.title)}</a> ${entry.rows}건`)
-    .join(", ");
-  return `<p>표준데이터에 없는 시·군·구는 지자체 파일데이터로 채웁니다: ${links}</p>`;
+  const items = used
+    .map((entry) => `<li><a href="${fileDataPageUrl(entry.fileDataId)}">${escapeHtml(entry.title)}</a> ${entry.rows}건</li>`)
+    .join("\n      ");
+  return `<p>표준데이터에 없는 시·군·구는 지자체 파일데이터로 채웁니다(${used.length}개 파일).</p>
+    <ul>
+      ${items}
+    </ul>`;
 }
 
 function indexHtml(meta) {
@@ -285,14 +297,18 @@ async function main() {
   const standardRows = inputFile ? readInput(inputFile) : await fetchAll();
   const supplements = [];
   if (!inputFile) {
+    // 포털에 부담을 주지 않게 하나씩 받는다(30개 남짓, 1분 안쪽).
     for (const source of SUPPLEMENTS) {
       supplements.push(await loadSupplement(source));
+      await sleep(300);
     }
   }
   const { rows, report } = mergeSupplements(standardRows, supplements);
   for (const entry of report) {
-    log(`보조 파일 ${entry.title}: ${entry.status === "covered" ? "표준데이터에 이 시·군·구가 있어 건너뜀" : `${entry.rows}건 (${entry.status})`}`);
+    const skipped = entry.coveredDistricts ? `, 표준데이터에 있는 ${entry.coveredDistricts.join("·")} 건너뜀` : "";
+    log(`보조 파일 ${entry.title}: ${entry.rows}건 (${entry.status}${skipped})`);
   }
+  log(`보조 파일 ${report.filter((entry) => entry.rows > 0).length}/${report.length}개, ${report.reduce((sum, entry) => sum + entry.rows, 0)}건`);
   const { bySido, stats } = groupBinsBySido(rows);
   const meta = buildMeta(bySido, stats, { generatedAt, sourceMode: inputFile ? "file" : "api", supplements: report });
   assertPlausibleCount("수거함", meta.bins.count, { minimum: minimumRows, previous: previousMeta?.bins?.count });

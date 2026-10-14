@@ -16,7 +16,7 @@ export const MAX_ROWS = 1000;
 
 /**
  * 앱의 toBin()이 읽는 필드. 이름은 2026-10-13 실제 API 응답 그대로다(제공기관은 insttCode·insttNm).
- * fileDataId 는 표준데이터가 아닌 지자체 파일데이터(SUPPLEMENTS)에서 온 행의 데이터 번호다. 앱이 출처·오류 신고 링크에 쓴다.
+ * fileDataId 는 표준데이터가 아닌 지자체 파일데이터(supplements.mjs)에서 온 행의 데이터 번호다. 앱이 출처·오류 신고 링크에 쓴다.
  */
 export const BIN_FIELDS = [
   "binId",
@@ -237,35 +237,6 @@ export function parseStandardFile(text) {
     .map((cells) => fromStandardRecord(Object.fromEntries(header.map((name, index) => [name, cells[index] ?? ""]))));
 }
 
-/**
- * 표준데이터에 없는 지자체가 공공데이터포털에 따로 올린 폐의약품 수거함 파일데이터.
- * 표준데이터에 그 시·군·구가 생기면 표준데이터를 쓰고 이 파일은 건너뛴다(mergeSupplements, ‘covered’).
- * 지자체가 파일을 해마다 새로 올리면 다운로드 주소(atchFileId)가 바뀌어, 빌드할 때마다 데이터 페이지에서 지금 주소를 찾는다.
- * 좌표가 없어 앱의 지역 선택과 ‘내 주변’ 목록 뒤쪽(위치 정보 없음)에 나오고, 지도는 주소로 찾는다.
- * columns 는 파일의 열 이름 → 스냅샷 필드다. 열 이름이 바뀌면 빌드가 이 출처만 직전 배포본으로 대신한다.
- *
- * 2026-10-14 카탈로그에서 ‘폐의약품’ 파일데이터를 찾아본 결과 울산은 북구 파일만 있었다(남구·중구·울주군은 파일도 없음).
- * insttCode 는 행정표준기관코드(울산 동구 3710000, 북구 3720000)로, 수거함 id(binIdentity)에 들어간다.
- */
-export const SUPPLEMENTS = [
-  {
-    fileDataId: "15168452",
-    title: "울산광역시 북구_폐의약품 수거함 위치",
-    ctpvNm: "울산광역시",
-    sggNm: "북구",
-    insttCode: "3720000",
-    insttNm: "울산광역시 북구",
-    columns: {
-      수거지명: "instlPlcNm",
-      주소: "lctnRoadNm",
-      세부위치: "actlPstn",
-      전화번호: "mngInstTelno",
-      관리기관명: "mngInstNm",
-      데이터기준일: "crtrYmd"
-    }
-  }
-];
-
 export function fileDataPageUrl(fileDataId) {
   return `https://www.data.go.kr/data/${fileDataId}/fileData.do`;
 }
@@ -278,29 +249,92 @@ export function findFileDownloadUrl(html) {
     : "";
 }
 
+/** 8자리 날짜(20260918)를 YYYY-MM-DD 로. 날짜로 볼 수 없으면 "". */
+function eightDigitDate(text) {
+  const match = String(text ?? "").match(/(20\d{2})(\d{2})(\d{2})(?!\d)/);
+  return match ? normalizeDate(`${match[1]}-${match[2]}-${match[3]}`) : "";
+}
+
+/** 데이터 페이지 제목(‘울산광역시 북구_폐의약품 수거함 위치_20260918’)의 날짜. 지자체가 붙이는 데이터 기준일이다. */
+export function findFileDataDate(html) {
+  const match = String(html ?? "").match(/파일데이터명<\/strong>\s*<div class="value">([^<]*)</);
+  return match ? eightDigitDate(match[1].match(/_(\d{8})\s*$/)?.[1]) : "";
+}
+
 /**
- * 보조 파일(CSV)을 원본 API 행 모양으로 바꾼다. 시도·시군구·제공기관은 파일에 없어 SUPPLEMENTS 설정으로 채운다.
- * 정한 열이 하나라도 없으면 던진다. 지자체가 파일 형식을 바꾼 것이라 잘못 읽느니 직전 배포본을 쓰는 편이 낫다.
+ * 다운로드 응답의 파일 이름(Content-Disposition)에 든 날짜. 페이지 제목보다 새 파일을 따라가는 경우가 많다(경주·경산).
+ * 서버가 UTF-8 이름을 그대로 보내 fetch 가 latin1 로 읽으므로 되돌려 읽는다.
  */
-export function parseSupplementFile(source, text) {
+export function dateFromContentDisposition(header) {
+  const raw = String(header ?? "");
+  let name = raw;
+  try {
+    name = new TextDecoder("utf-8").decode(Uint8Array.from(raw, (char) => char.charCodeAt(0) & 0xff));
+  } catch {
+    // 되돌리지 못하면 받은 그대로 날짜만 찾는다.
+  }
+  return eightDigitDate(name.match(/filename\*?=([^;]*)/i)?.[1] ?? "");
+}
+
+/**
+ * 주소 앞부분을 prefix(‘경상북도 성주군’)로 맞춘다. 시도·시군이 빠졌거나(‘성주읍 성밖숲길 12’),
+ * 줄임말이거나(‘경북 구미시 …’), 두 번 들어간(‘경상남도 함안군 경상남도 함안군 …’) 원본을 바로잡는다.
+ * 앞에서부터 prefix 의 낱말·줄임말인 낱말을 걷어 내고 prefix 를 붙인다. prefix 가 없으면 공백만 정리한다.
+ */
+export function prefixAddress(address, prefix, aliases = []) {
+  const text = cleanText(address);
+  if (!prefix || !text) {
+    return text;
+  }
+  const strip = new Set([...cleanText(prefix).split(" "), ...aliases]);
+  const words = text.split(" ");
+  let start = 0;
+  while (start < words.length - 1 && strip.has(words[start])) {
+    start += 1;
+  }
+  return `${cleanText(prefix)} ${words.slice(start).join(" ")}`;
+}
+
+/** 이 설정이 읽어야 하는 열(공백 정리 후 이름). */
+function requiredColumns(source) {
+  return [...Object.keys(source.columns), ...(source.nameColumns ?? []), ...(source.districtColumn ? [source.districtColumn] : [])];
+}
+
+/**
+ * 보조 파일(CSV)을 원본 API 행 모양으로 바꾼다. 시도·제공기관(과 한 시·군·구 파일의 시군구)은 파일에 없어 설정으로 채운다.
+ * 정한 열이 하나라도 없으면 던진다. 지자체가 파일 형식을 바꾼 것이라 잘못 읽느니 직전 배포본을 쓰는 편이 낫다.
+ * fallbackDate 는 기준일 열이 없거나 빈 행의 기준일(파일 이름·페이지 제목의 날짜)이다.
+ */
+export function parseSupplementFile(source, text, { fallbackDate = "" } = {}) {
   const [header = [], ...rows] = parseCsv(String(text ?? "").replace(/^\uFEFF/, "").trim());
   const names = header.map((name) => cleanText(name));
-  const missing = Object.keys(source.columns).filter((column) => !names.includes(column));
+  const missing = requiredColumns(source).filter((column) => !names.includes(column));
   if (missing.length > 0) {
     throw new Error(`${source.title}: 열이 없습니다(${missing.join(", ")})`);
   }
+  const cell = (cells, column) => cleanText(cells[names.indexOf(column)]);
   return rows
-    .filter((cells) => cells.some((cell) => cell.trim() !== ""))
+    .filter((cells) => cells.some((value) => value.trim() !== ""))
     .map((cells) => {
       const row = {
         ctpvNm: source.ctpvNm,
-        sggNm: source.sggNm,
-        insttCode: source.insttCode,
+        sggNm: source.districtColumn ? cell(cells, source.districtColumn) : source.sggNm,
         insttNm: source.insttNm,
         fileDataId: source.fileDataId
       };
       for (const [column, field] of Object.entries(source.columns)) {
-        row[field] = cells[names.indexOf(column)] ?? "";
+        row[field] = cell(cells, column);
+      }
+      if (source.nameColumns) {
+        row.instlPlcNm = [...new Set(source.nameColumns.map((column) => cell(cells, column)).filter(Boolean))].join(" ");
+      }
+      for (const field of ["lctnRoadNm", "lctnLotnoAddr"]) {
+        if (row[field]) {
+          row[field] = prefixAddress(row[field], source.addressPrefix, source.addressAliases);
+        }
+      }
+      if (!normalizeDate(row.crtrYmd) && fallbackDate) {
+        row.crtrYmd = fallbackDate;
       }
       return row;
     });
@@ -309,29 +343,30 @@ export function parseSupplementFile(source, text) {
 /**
  * 표준데이터 행에 보조 파일 행을 붙인다. supplements 는 [{source, rows, status}]이고 status 는
  * fetched(새로 받음)·previous(못 받아 직전 배포본 사용)·failed(둘 다 없음)다.
- * 표준데이터에 이미 그 시·군·구가 있으면 그 파일은 쓰지 않는다(covered). report 는 meta.supplements 가 된다.
+ * 표준데이터에 이미 있는 시·군·구의 행은 쓰지 않는다. 같은 수거함이 이름 표기만 달라 두 번 보이지 않게 하려는 것이다.
+ * 파일의 모든 행이 그렇게 빠지면 status 가 covered 다. report 는 meta.supplements 가 된다.
  */
 export function mergeSupplements(standardRows, supplements) {
-  const covered = new Set(standardRows.map((raw) => {
+  const districtKey = (raw) => {
     const { row, sidoCode } = normalizeRow(raw);
     return `${sidoCode}:${row.sggNm ?? ""}`;
-  }));
+  };
+  const covered = new Set(standardRows.map(districtKey));
   const rows = [...standardRows];
   const report = [];
   for (const { source, rows: extra, status } of supplements) {
-    const sidoCode = resolveSidoCode(source);
-    const isCovered = covered.has(`${sidoCode}:${source.sggNm}`);
-    const used = !isCovered && status !== "failed";
-    if (used) {
-      rows.push(...extra);
-    }
+    const used = status === "failed" ? [] : extra.filter((raw) => !covered.has(districtKey(raw)));
+    rows.push(...used);
+    const skipped = [...new Set(extra.filter((raw) => covered.has(districtKey(raw))).map((raw) => normalizeRow(raw).row.sggNm ?? ""))]
+      .sort((a, b) => a.localeCompare(b, "ko"));
     report.push({
       fileDataId: source.fileDataId,
       title: source.title,
-      sidoCode,
-      district: source.sggNm,
-      status: isCovered ? "covered" : status,
-      rows: used ? extra.length : 0
+      sidoCode: resolveSidoCode(source),
+      ...(source.sggNm ? { district: source.sggNm } : {}),
+      status: status !== "failed" && extra.length > 0 && used.length === 0 ? "covered" : status,
+      rows: used.length,
+      ...(skipped.length > 0 ? { coveredDistricts: skipped } : {})
     });
   }
   return { rows, report };
@@ -425,11 +460,15 @@ const NO_DISTRICT = "없음";
  */
 export const RENAMED_DISTRICTS = new Map([["28:동구", "제물포구"]]);
 
-/** 시군구명이 비어 있으면 주소의 두 번째 낱말(…시·군·구)로 채운다. 세종처럼 시군구가 없으면 "". */
+/**
+ * 시군구명이 비어 있으면 주소의 두 번째 낱말(…시·군·구)로 채운다. 세종처럼 시군구가 없으면 "".
+ * 일반구(‘청주시 상당구’)는 시(‘청주시’)로 맞춘다. 앱의 시·군·구 목록이 자치구·시·군 단위라, 그대로 두면
+ * ‘청주시 · 데이터 없음’ 옆에 일반구 4개가 따로 보인다(2026-10 원본에서 일반구로 쓴 곳은 청주 434건뿐).
+ */
 export function resolveDistrict(row) {
   const district = cleanText(row?.sggNm);
   if (district && district !== NO_DISTRICT) {
-    return district;
+    return district.match(/^(\S+시) \S+구$/)?.[1] ?? district;
   }
   for (const address of [row?.lctnRoadNm, row?.lctnLotnoAddr]) {
     const second = cleanText(address).split(" ")[1] ?? "";
@@ -502,9 +541,12 @@ export function hash53(text, seed = 0) {
   return 4294967296 * (2097151 & h2) + (h1 >>> 0);
 }
 
-/** 같은 기관·장소·주소·세부위치면 같은 수거함이다. 좌표는 지자체가 고쳐도 같은 수거함이라 넣지 않는다. */
+/**
+ * 같은 기관·장소·주소·세부위치면 같은 수거함이다. 좌표는 지자체가 고쳐도 같은 수거함이라 넣지 않는다.
+ * 지자체 파일데이터 행은 기관코드가 없어 데이터 번호를 기관 자리에 쓴다.
+ */
 export function binIdentity(row) {
-  return [row.insttCode, row.instlPlcNm, row.lctnRoadNm || row.lctnLotnoAddr, row.actlPstn]
+  return [row.insttCode || (row.fileDataId ? `file:${row.fileDataId}` : ""), row.instlPlcNm, row.lctnRoadNm || row.lctnLotnoAddr, row.actlPstn]
     .map((value) => cleanText(value))
     .join("|");
 }

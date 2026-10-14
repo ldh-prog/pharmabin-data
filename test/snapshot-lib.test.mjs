@@ -9,7 +9,8 @@ import {
   buildPointsFile,
   contentHash,
   decodeText,
-  SUPPLEMENTS,
+  dateFromContentDisposition,
+  findFileDataDate,
   findFileDownloadUrl,
   findMisplacedPoints,
   fromStandardRecord,
@@ -25,9 +26,11 @@ import {
   parseCsv,
   parseStandardFile,
   parseSupplementFile,
+  prefixAddress,
   resolveDistrict,
   resolveSidoCode
 } from "../scripts/snapshot-lib.mjs";
+import { SUPPLEMENTS } from "../scripts/supplements.mjs";
 
 function apiRow(overrides = {}) {
   return {
@@ -152,6 +155,13 @@ describe("resolveDistrict", () => {
     assert.equal(resolveDistrict({ sggNm: " 남구 " }), "남구");
     assert.equal(resolveDistrict({ sggNm: "", lctnRoadNm: "울산광역시 울주군 언양읍 1" }), "울주군");
     assert.equal(resolveDistrict({ sggNm: "", lctnRoadNm: "세종특별자치시 한누리대로 2130" }), "");
+  });
+
+  it("일반구는 시로 맞춘다(2026-10 원본의 청주시 상당구 등)", () => {
+    assert.equal(resolveDistrict({ sggNm: "청주시 상당구" }), "청주시");
+    assert.equal(resolveDistrict({ sggNm: " 청주시  흥덕구 " }), "청주시");
+    assert.equal(resolveDistrict({ sggNm: "수원시" }), "수원시");
+    assert.equal(resolveDistrict({ sggNm: "중구" }), "중구");
   });
 
   it("세종의 시군구명 ‘없음’은 빈 값으로 본다(2026-10 원본)", () => {
@@ -420,11 +430,10 @@ describe("보조 파일데이터(SUPPLEMENTS)", () => {
     assert.deepEqual(rows[0], {
       ctpvNm: "울산광역시",
       sggNm: "북구",
-      insttCode: "3720000",
       insttNm: "울산광역시 북구",
       fileDataId: "15168452",
       instlPlcNm: "북구 보건소",
-      lctnRoadNm: "울산광역시 북구 산업로 1018 ",
+      lctnRoadNm: "울산광역시 북구 산업로 1018",
       actlPstn: "1층 민원실 접수",
       mngInstTelno: "052-289-3450",
       mngInstNm: "북구 보건소",
@@ -449,6 +458,7 @@ describe("보조 파일데이터(SUPPLEMENTS)", () => {
     assert.equal(covered.rows.length, 2);
     assert.equal(covered.report[0].status, "covered");
     assert.equal(covered.report[0].rows, 0);
+    assert.deepEqual(covered.report[0].coveredDistricts, ["북구"]);
 
     const failed = mergeSupplements([donggu], [{ source: BUKGU, rows: [], status: "failed" }]);
     assert.deepEqual([failed.rows.length, failed.report[0].status, failed.report[0].rows], [1, "failed", 0]);
@@ -467,6 +477,81 @@ describe("보조 파일데이터(SUPPLEMENTS)", () => {
     const meta = buildMeta(bySido, stats, { generatedAt: "2026-10-14T00:00:00.000Z", sourceMode: "api", supplements: report });
     assert.deepEqual(meta.supplements, report);
     assert.deepEqual(meta.bins.sidos["31"].districts, { 동구: 1, 북구: 2 });
+  });
+});
+
+describe("보조 파일데이터 — 여러 형식", () => {
+  const JEONNAM = SUPPLEMENTS.find((source) => source.fileDataId === "15113201");
+  const SEONGJU = SUPPLEMENTS.find((source) => source.fileDataId === "15113245");
+  const DAEGU_SEOGU = SUPPLEMENTS.find((source) => source.fileDataId === "15112956");
+
+  it("설정 30개: 번호가 겹치지 않고, 시도를 알 수 있고, 시·군·구는 sggNm 이나 districtColumn 하나로 정한다", () => {
+    assert.equal(SUPPLEMENTS.length, 30);
+    assert.equal(new Set(SUPPLEMENTS.map((source) => source.fileDataId)).size, SUPPLEMENTS.length);
+    for (const source of SUPPLEMENTS) {
+      assert.match(source.fileDataId, /^\d+$/, source.title);
+      assert.notEqual(resolveSidoCode(source), "", source.title);
+      assert.equal(Boolean(source.sggNm) !== Boolean(source.districtColumn), true, source.title);
+      assert.equal(Object.values(source.columns).includes("lctnRoadNm"), true, source.title);
+      assert.equal(Object.values(source.columns).includes("instlPlcNm") || Boolean(source.nameColumns), true, source.title);
+    }
+  });
+
+  it("주소 앞부분을 바로잡는다: 빠진 시도·시군, 줄임말, 두 번 들어간 앞부분", () => {
+    assert.equal(prefixAddress("성주읍 성밖숲길 12", "경상북도 성주군", ["경북"]), "경상북도 성주군 성주읍 성밖숲길 12");
+    assert.equal(prefixAddress("성주군 성주읍 성주로 3207", "경상북도 성주군", ["경북"]), "경상북도 성주군 성주읍 성주로 3207");
+    assert.equal(prefixAddress("경북 구미시 선산대로 111 ", "경상북도 구미시", ["경북"]), "경상북도 구미시 선산대로 111");
+    assert.equal(
+      prefixAddress("경상남도 함안군 경상남도 함안군 가야읍 중앙남 4길 10", "경상남도 함안군", ["경남"]),
+      "경상남도 함안군 가야읍 중앙남 4길 10"
+    );
+    assert.equal(prefixAddress("   목포시 원산로45번길 5", "전라남도", ["전남"]), "전라남도 목포시 원산로45번길 5");
+    assert.equal(prefixAddress("울산광역시  북구 산업로 1018 ", undefined), "울산광역시 북구 산업로 1018");
+  });
+
+  it("기준일: 페이지 제목과 다운로드 파일 이름의 날짜", () => {
+    assert.equal(findFileDataDate('<strong class="key">파일데이터명</strong>\n  <div class="value">울산광역시 북구_폐의약품 수거함 위치_20260918</div>'), "2026-09-18");
+    assert.equal(findFileDataDate("<html></html>"), "");
+    // fetch 는 UTF-8 파일 이름을 latin1 글자로 돌려준다.
+    const latin1 = String.fromCharCode(...new TextEncoder().encode('attachment; filename="경상북도_경주시_폐의약품 수거함 현황_20260911.csv"'));
+    assert.equal(dateFromContentDisposition(latin1), "2026-09-11");
+    assert.equal(dateFromContentDisposition('attachment; filename="전라남도_폐의약품 수거함 설치 현황.csv"'), "");
+  });
+
+  it("여러 시·군·구가 든 파일은 열에서 시·군·구를 읽고, 표준데이터에 있는 시·군·구 행만 건너뛴다", () => {
+    const csv = "시군,설치장소,도로명주소,비고\n"
+      + "목포시,목포시보건소, 목포시 원산로45번길 5,목포시보건소 1층 민원실 \n"
+      + "강진군,강진군보건소,강진군 강진읍 1,\n";
+    const extra = parseSupplementFile(JEONNAM, csv, { fallbackDate: "2026-02-11" });
+    assert.deepEqual(extra.map((row) => [row.sggNm, row.lctnRoadNm, row.crtrYmd]), [
+      ["목포시", "전라남도 목포시 원산로45번길 5", "2026-02-11"],
+      ["강진군", "전라남도 강진군 강진읍 1", "2026-02-11"]
+    ]);
+    const gangjin = apiRow({ ctpvNm: "전남광주통합특별시", sggNm: "강진군", lctnRoadNm: "전라남도 강진군 강진읍 2" });
+    const { rows, report } = mergeSupplements([gangjin], [{ source: JEONNAM, rows: extra, status: "fetched" }]);
+    assert.equal(rows.length, 2);
+    assert.equal(rows[1].instlPlcNm, "목포시보건소");
+    assert.deepEqual(report[0], {
+      fileDataId: "15113201", title: JEONNAM.title, sidoCode: "12", status: "fetched", rows: 1, coveredDistricts: ["강진군"]
+    });
+  });
+
+  it("기준일 열이 있으면 그 값을 쓰고, 이름 열이 없으면 정한 열을 이어 붙인다", () => {
+    const [seongju] = parseSupplementFile(SEONGJU, "순번,폐의약품 회수함 보관장소명,주소\n1,성주군보건소,성주읍 성밖숲길 12\n", { fallbackDate: "2023-04-07" });
+    assert.equal(seongju.lctnRoadNm, "경상북도 성주군 성주읍 성밖숲길 12");
+    assert.equal(seongju.crtrYmd, "2023-04-07");
+    const [seogu, other] = parseSupplementFile(DAEGU_SEOGU, "연번,관할구분,행정동,도로명주소\n1,약국,내당1동,대구광역시 서구 서대구로4길 35(내당동)\n2,기타,기타,대구광역시 서구 두류역 일원(내당동)\n");
+    assert.equal(seogu.instlPlcNm, "내당1동 약국");
+    assert.equal(other.instlPlcNm, "기타");
+    const bukgu = SUPPLEMENTS.find((source) => source.fileDataId === "15168452");
+    const [dated] = parseSupplementFile(bukgu, "수거지명,주소,세부위치,전화번호,관리기관명,데이터기준일\n북구 보건소,울산광역시 북구 산업로 1018,,,,2026-09-18\n", { fallbackDate: "2025-01-01" });
+    assert.equal(dated.crtrYmd, "2026-09-18");
+  });
+
+  it("파일데이터 행의 id 는 데이터 번호로 기관 자리를 채운다(기관코드 없음)", () => {
+    const row = { instlPlcNm: "북구 보건소", lctnRoadNm: "울산광역시 북구 산업로 1018", fileDataId: "15168452" };
+    assert.equal(binIdentity(row), "file:15168452|북구 보건소|울산광역시 북구 산업로 1018|");
+    assert.equal(binIdentity({ ...row, insttCode: "3720000" }).startsWith("3720000|"), true);
   });
 });
 
