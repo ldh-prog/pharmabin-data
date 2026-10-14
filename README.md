@@ -37,12 +37,28 @@ API 응답은 `{header, body}`가 최상위에 바로 옵니다(2026-10-13 확�
 
 배포 전 안전장치: 받은 행이 `totalCount`의 99% 미만, 3,000건 미만, 직전 배포의 90% 미만이면 실패합니다. 직전 배포본을 네트워크 문제로 못 읽으면 첫 실행처럼 굴지 않고 멈춥니다.
 
+### 지자체 파일데이터로 채우기
+
+표준데이터에는 지자체가 올린 시·군·구만 있습니다(2026-10 울산은 5곳 중 동구뿐). 표준데이터에 없는 시·군·구가 공공데이터포털에 따로 올린 폐의약품 수거함 **파일데이터**가 있으면 `scripts/snapshot-lib.mjs`의 `SUPPLEMENTS`에 적어 함께 배포합니다.
+
+| 지금 쓰는 파일 | 행 | 비고 |
+| --- | --- | --- |
+| [울산광역시 북구_폐의약품 수거함 위치](https://www.data.go.kr/data/15168452/fileData.do) (15168452) | 11 | 2026-09-29 등록, 연 1회 갱신. 좌표 없음 |
+
+- API로 받을 때만 붙입니다. `INPUT_FILE`(비상·샘플 빌드)일 때는 받지 않습니다.
+- 지자체가 파일을 새로 올리면 다운로드 주소(`atchFileId`)가 바뀌어, 빌드마다 데이터 페이지에서 지금 주소를 찾습니다.
+- 표준데이터에 그 시·군·구가 생기면 표준데이터를 쓰고 파일은 건너뜁니다(`meta.supplements[].status` = `covered`).
+- 못 받거나 열 이름이 바뀌면 그 파일만 직전 배포본의 같은 행(`fileDataId`)을 씁니다(`previous`). 직전 배포본에도 없으면 이번에는 뺍니다(`failed`). 작은 보조 파일 때문에 표준데이터 갱신을 멈추지 않으려는 것입니다. 로그에 이유가 남습니다.
+- 시도·시군구·제공기관(`insttCode`·`insttNm`)은 파일에 없어 설정으로 채우고, 행에 `fileDataId`를 붙입니다. 앱은 이 번호로 출처와 오류 신고 링크를 그 파일 페이지로 바꿉니다.
+- 좌표가 없는 파일은 앱의 지역 선택과 ‘내 주변’ 목록 맨 뒤(위치 정보 없음)에 나오고, 지도는 주소로 찾습니다.
+- 2026-10-14 카탈로그 검색(‘폐의약품’)에서 표준데이터에 없는 시·군·구의 수거함·약국 파일이 37개쯤 더 보였습니다(서울 동대문구·서대문구·양천구·용산구, 경북 경주·구미·경산 등). 열 이름이 파일마다 달라 하나씩 확인해 넣어야 합니다. 울산 남구·중구·울주군은 파일도 없습니다.
+
 ## 파일 형식 (v1)
 
 | 파일 | 내용 |
 | --- | --- |
-| `v1/meta.json` | `{schema, generatedAt, source, sourceMode, contentHash, bins:{count, withCoordinates, latestDataDate, dropped, duplicates, swappedCoordinates, misplacedCoordinates, sidos:{코드:{count, withCoordinates, districts:{시군구:건수}}}}}` |
-| `v1/bins/{코드}.json` | `{schema, generatedAt, sidoCode, count, items:[{binId, instlPlcNm, ctpvNm, sggNm, lctnRoadNm, lctnLotnoAddr, lat, lot, actlPstn, mngInstNm, mngInstTelno, crtrYmd, insttCode, insttNm}]}` 빈 값은 뺍니다 |
+| `v1/meta.json` | `{schema, generatedAt, source, sourceMode, supplements:[{fileDataId, title, sidoCode, district, status, rows}], contentHash, bins:{count, withCoordinates, latestDataDate, dropped, duplicates, swappedCoordinates, misplacedCoordinates, sidos:{코드:{count, withCoordinates, districts:{시군구:건수}}}}}` |
+| `v1/bins/{코드}.json` | `{schema, generatedAt, sidoCode, count, items:[{binId, instlPlcNm, ctpvNm, sggNm, lctnRoadNm, lctnLotnoAddr, lat, lot, actlPstn, mngInstNm, mngInstTelno, crtrYmd, insttCode, insttNm, fileDataId}]}` 빈 값은 뺍니다. `fileDataId`는 지자체 파일데이터에서 온 행에만 있습니다 |
 | `v1/points.json` | `{schema, generatedAt, sidos:{코드:[[위도, 경도], …]}}` 소수 5자리. 앱이 위치를 보내지 않고 기기에서 가까운 시도를 고릅니다 |
 | `index.html` | 사람이 보는 목록과 출처 |
 | `privacy.html` | 앱 개인정보처리방침의 웹 사본(Play Console에 넣는 주소). `pages/privacy.html`을 빌드마다 복사합니다. 원문은 앱의 `public/privacy.html`이고, 다른 점은 앱 안에서만 쓰는 ‘앱으로 돌아가기’ 링크가 없는 것뿐입니다(앱 테스트가 비교). 고치면 `FORCE=1`로 배포합니다 |
@@ -98,4 +114,4 @@ npm run build:sample # test/fixtures 의 샘플로 site/ 생성 (앱 개발 서�
 
 ## 출처
 
-공공데이터포털 「전국폐의약품수거함표준데이터」(각 지자체 제공, 월 1회 병합). 이설·철거가 늦게 반영될 수 있으니 방문 전 현장을 확인하세요.
+공공데이터포털 「전국폐의약품수거함표준데이터」(각 지자체 제공, 월 1회 병합)와, 표준데이터에 없는 시·군·구의 지자체 파일데이터(위 ‘지자체 파일데이터로 채우기’ 표). 이설·철거가 늦게 반영될 수 있으니 방문 전 현장을 확인하세요.

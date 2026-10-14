@@ -9,18 +9,22 @@ import {
   buildPointsFile,
   contentHash,
   decodeText,
+  SUPPLEMENTS,
+  findFileDownloadUrl,
   findMisplacedPoints,
   fromStandardRecord,
   gatewayReasonCode,
   groupBinsBySido,
   hash53,
   isFatalGatewayCode,
+  mergeSupplements,
   normalizeCoordinates,
   normalizeDate,
   normalizeServiceKey,
   parseApiPage,
   parseCsv,
   parseStandardFile,
+  parseSupplementFile,
   resolveDistrict,
   resolveSidoCode
 } from "../scripts/snapshot-lib.mjs";
@@ -390,6 +394,79 @@ describe("buildPointsFile / buildMeta / contentHash", () => {
     assert.equal(contentHash(again), contentHash(bySido));
     const changed = groupBinsBySido([apiRow({ actlPstn: "2층" })]).bySido;
     assert.notEqual(contentHash(changed), contentHash(bySido));
+  });
+});
+
+describe("보조 파일데이터(SUPPLEMENTS)", () => {
+  const BUKGU = SUPPLEMENTS.find((source) => source.fileDataId === "15168452");
+  // 2026-09-29 공공데이터포털 원문(UTF-8 BOM, ‘주소 ’ 열 이름 뒤 공백, 값 뒤 공백 그대로)
+  const BUKGU_CSV = "\uFEFF수거지명,주소 ,세부위치,전화번호,관리기관명,데이터기준일\r\n"
+    + "북구 보건소,울산광역시 북구 산업로 1018 ,1층 민원실 접수,052-289-3450,북구 보건소,2026-09-18\r\n"
+    + "농소2동 행정복지센터 ,울산광역시 북구 찬샘1길 24 ,차치센터 출입구 계단옆,052-295-6597,북구 보건소,2026-09-18\r\n"
+    + ",,,,,\r\n";
+
+  it("데이터 페이지에서 지금 파일의 다운로드 주소를 찾는다", () => {
+    const html = '<a href="#" onclick="fn_fileDataDown(\'/cmm/cmm/fileDownload.do?atchFileId=FILE_000000007700070&amp;fileDetailSn=1&insertDataPrcus=N\')">';
+    assert.equal(
+      findFileDownloadUrl(html),
+      "https://www.data.go.kr/cmm/cmm/fileDownload.do?atchFileId=FILE_000000007700070&fileDetailSn=1&insertDataPrcus=N"
+    );
+    assert.equal(findFileDownloadUrl("<html>파일 없음</html>"), "");
+  });
+
+  it("CSV를 원본 API 행 모양으로 바꾸고, 시도·시군구·제공기관은 설정으로 채운다", () => {
+    const rows = parseSupplementFile(BUKGU, BUKGU_CSV);
+    assert.equal(rows.length, 2);
+    assert.deepEqual(rows[0], {
+      ctpvNm: "울산광역시",
+      sggNm: "북구",
+      insttCode: "3720000",
+      insttNm: "울산광역시 북구",
+      fileDataId: "15168452",
+      instlPlcNm: "북구 보건소",
+      lctnRoadNm: "울산광역시 북구 산업로 1018 ",
+      actlPstn: "1층 민원실 접수",
+      mngInstTelno: "052-289-3450",
+      mngInstNm: "북구 보건소",
+      crtrYmd: "2026-09-18"
+    });
+  });
+
+  it("정한 열이 없으면(지자체가 형식을 바꿈) 던진다", () => {
+    assert.throws(() => parseSupplementFile(BUKGU, "수거지명,도로명주소\n북구 보건소,울산광역시 북구 산업로 1018"), /열이 없습니다\(주소, 세부위치/);
+    assert.throws(() => parseSupplementFile(BUKGU, "<!DOCTYPE html><html></html>"), /열이 없습니다/);
+  });
+
+  it("표준데이터에 없는 시·군·구만 붙이고, 이미 있으면 건너뛴다", () => {
+    const extra = parseSupplementFile(BUKGU, BUKGU_CSV);
+    const donggu = apiRow({ sggNm: "동구", lctnRoadNm: "울산광역시 동구 봉수로 170" });
+    const added = mergeSupplements([donggu], [{ source: BUKGU, rows: extra, status: "fetched" }]);
+    assert.equal(added.rows.length, 3);
+    assert.deepEqual(added.report, [{ fileDataId: "15168452", title: BUKGU.title, sidoCode: "31", district: "북구", status: "fetched", rows: 2 }]);
+
+    const bukgu = apiRow({ sggNm: "북구", lctnRoadNm: "울산광역시 북구 산업로 1" });
+    const covered = mergeSupplements([donggu, bukgu], [{ source: BUKGU, rows: extra, status: "fetched" }]);
+    assert.equal(covered.rows.length, 2);
+    assert.equal(covered.report[0].status, "covered");
+    assert.equal(covered.report[0].rows, 0);
+
+    const failed = mergeSupplements([donggu], [{ source: BUKGU, rows: [], status: "failed" }]);
+    assert.deepEqual([failed.rows.length, failed.report[0].status, failed.report[0].rows], [1, "failed", 0]);
+  });
+
+  it("붙인 행은 좌표 없이 시·군·구와 fileDataId 를 달고 스냅샷에 들어간다", () => {
+    const { rows, report } = mergeSupplements([apiRow({ sggNm: "동구" })], [{ source: BUKGU, rows: parseSupplementFile(BUKGU, BUKGU_CSV), status: "fetched" }]);
+    const { bySido, stats } = groupBinsBySido(rows);
+    const bukgu = bySido.get("31").filter((item) => item.sggNm === "북구");
+    assert.equal(bukgu.length, 2);
+    const clinic = bukgu.find((item) => item.instlPlcNm === "북구 보건소");
+    assert.equal(clinic.fileDataId, "15168452");
+    assert.equal(clinic.lctnRoadNm, "울산광역시 북구 산업로 1018");
+    assert.equal("lat" in clinic, false);
+    assert.equal(Object.keys(clinic).at(-1), "fileDataId");
+    const meta = buildMeta(bySido, stats, { generatedAt: "2026-10-14T00:00:00.000Z", sourceMode: "api", supplements: report });
+    assert.deepEqual(meta.supplements, report);
+    assert.deepEqual(meta.bins.sidos["31"].districts, { 동구: 1, 북구: 2 });
   });
 });
 

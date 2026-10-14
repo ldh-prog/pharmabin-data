@@ -8,6 +8,7 @@
  *   DATA_GO_KR_SERVICE_KEY  API로 받을 때 필수. 로그에 남기지 않는다.
  *   INPUT_FILE              포털에서 내려받은 표준데이터 파일(JSON·CSV). 있으면 API 대신 이 파일을 읽는다.
  *                           API가 막혔을 때의 비상 경로이고, 샘플 빌드(npm run build:sample)에도 쓴다.
+ *                           이때는 보조 파일데이터(SUPPLEMENTS)를 받지 않는다(샘플·테스트가 네트워크를 쓰지 않게).
  *   PAGES_BASE_URL          직전 배포본 주소. 건수 하한 비교에 쓴다.
  *   MIN_ROWS                건수 하한(기본 3000). 샘플 빌드에서만 0으로 낮춘다.
  *   OUT_DIR                 기본 site
@@ -20,14 +21,20 @@ import {
   SCHEMA_VERSION,
   SIDOS,
   SOURCE_URL,
+  SUPPLEMENTS,
   assertPlausibleCount,
   buildMeta,
   buildPointsFile,
   decodeText,
+  fileDataPageUrl,
+  findFileDownloadUrl,
   groupBinsBySido,
+  mergeSupplements,
   normalizeServiceKey,
   parseApiPage,
-  parseStandardFile
+  parseStandardFile,
+  parseSupplementFile,
+  resolveSidoCode
 } from "./snapshot-lib.mjs";
 
 const serviceKey = normalizeServiceKey(process.env.DATA_GO_KR_SERVICE_KEY);
@@ -115,6 +122,65 @@ async function fetchAll() {
   return rows;
 }
 
+/** 인증키가 들지 않는 공개 주소(파일데이터 페이지·다운로드·직전 배포본)를 받는다. */
+async function fetchBytes(url) {
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+      if (!response.ok) {
+        throw Object.assign(new Error(`HTTP ${response.status}`), { status: response.status });
+      }
+      return new Uint8Array(await response.arrayBuffer());
+    } catch (error) {
+      lastError = error;
+      if (error?.status === 404) {
+        break;
+      }
+      if (attempt < 3) {
+        await sleep(2000 * attempt);
+      }
+    }
+  }
+  throw lastError;
+}
+
+/** 직전 배포본에서 그 보조 파일에서 온 행. 없거나 못 읽으면 빈 배열. */
+async function previousSupplementRows(source) {
+  if (!pagesBaseUrl) {
+    return [];
+  }
+  try {
+    const file = JSON.parse(decodeText(await fetchBytes(`${pagesBaseUrl}/v1/bins/${resolveSidoCode(source)}.json`)));
+    return (file?.items ?? []).filter((item) => item.fileDataId === source.fileDataId);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 보조 파일 하나. 못 받거나 형식이 바뀌었으면 직전 배포본의 같은 행을 쓴다.
+ * 작은 보조 파일 때문에 표준데이터(전국 7천여 곳) 갱신을 멈추지 않으려는 것이다. 이유는 로그에 남긴다.
+ */
+async function loadSupplement(source) {
+  try {
+    const page = decodeText(await fetchBytes(fileDataPageUrl(source.fileDataId)));
+    const url = findFileDownloadUrl(page);
+    if (!url) {
+      throw new Error("데이터 페이지에서 다운로드 주소를 찾지 못했습니다.");
+    }
+    const rows = parseSupplementFile(source, decodeText(await fetchBytes(url)));
+    if (rows.length === 0) {
+      throw new Error("파일에 행이 없습니다.");
+    }
+    return { source, rows, status: "fetched" };
+  } catch (error) {
+    const previous = await previousSupplementRows(source);
+    log(`보조 파일 받기 실패 ${source.title}(${source.fileDataId}): ${describe(error)} → ${previous.length > 0 ? `직전 배포본 ${previous.length}건 사용` : "이번에는 뺌"}`);
+    return { source, rows: previous, status: previous.length > 0 ? "previous" : "failed" };
+  }
+}
+
 function readInput(path) {
   const rows = parseStandardFile(decodeText(readFileSync(resolve(path))));
   log(`파일 ${path}: ${rows.length}행`);
@@ -164,6 +230,17 @@ function escapeHtml(value) {
   return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
+function supplementsHtml(meta) {
+  const used = meta.supplements.filter((entry) => entry.rows > 0);
+  if (used.length === 0) {
+    return "";
+  }
+  const links = used
+    .map((entry) => `<a href="${fileDataPageUrl(entry.fileDataId)}">${escapeHtml(entry.title)}</a> ${entry.rows}건`)
+    .join(", ");
+  return `<p>표준데이터에 없는 시·군·구는 지자체 파일데이터로 채웁니다: ${links}</p>`;
+}
+
 function indexHtml(meta) {
   const sidoLinks = SIDOS
     .filter((sido) => meta.bins.sidos[sido.code])
@@ -186,6 +263,7 @@ function indexHtml(meta) {
     <p>「폐의약품 수거함 찾기」 앱(kr.ulsan.ldh.pharmabin)이 읽는 정적 파일입니다. 원본 내용이 바뀐 날에만 새로 올립니다.</p>
     <p>출처: 공공데이터포털 <a href="${SOURCE_URL}">전국폐의약품수거함표준데이터</a>(각 지자체 제공, 월 1회 병합). 이설·철거가 늦게 반영될 수 있으니 방문 전 현장을 확인하세요.</p>
     <p>생성: <code>${meta.generatedAt}</code> · 수거함 ${meta.bins.count}곳(좌표 ${meta.bins.withCoordinates}곳) · 최신 데이터 기준일 <code>${meta.bins.latestDataDate || "-"}</code></p>
+    ${supplementsHtml(meta)}
     <p><a href="v1/meta.json">v1/meta.json</a> · <a href="v1/points.json">v1/points.json</a> · <a href="privacy.html">앱 개인정보처리방침</a></p>
     <ul>
       ${sidoLinks}
@@ -204,9 +282,19 @@ async function main() {
   const previousMeta = await loadPreviousMeta();
   log(previousMeta ? `직전 배포: ${previousMeta.generatedAt} (${previousMeta.bins?.count}건)` : "직전 배포 없음");
 
-  const rows = inputFile ? readInput(inputFile) : await fetchAll();
+  const standardRows = inputFile ? readInput(inputFile) : await fetchAll();
+  const supplements = [];
+  if (!inputFile) {
+    for (const source of SUPPLEMENTS) {
+      supplements.push(await loadSupplement(source));
+    }
+  }
+  const { rows, report } = mergeSupplements(standardRows, supplements);
+  for (const entry of report) {
+    log(`보조 파일 ${entry.title}: ${entry.status === "covered" ? "표준데이터에 이 시·군·구가 있어 건너뜀" : `${entry.rows}건 (${entry.status})`}`);
+  }
   const { bySido, stats } = groupBinsBySido(rows);
-  const meta = buildMeta(bySido, stats, { generatedAt, sourceMode: inputFile ? "file" : "api" });
+  const meta = buildMeta(bySido, stats, { generatedAt, sourceMode: inputFile ? "file" : "api", supplements: report });
   assertPlausibleCount("수거함", meta.bins.count, { minimum: minimumRows, previous: previousMeta?.bins?.count });
 
   rmSync(outDir, { recursive: true, force: true });

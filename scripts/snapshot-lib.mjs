@@ -3,7 +3,7 @@
  *
  * 앱(kr.ulsan.ldh.pharmabin)은 표준데이터 API의 원본 필드명을 그대로 읽어 toBin()으로 매핑한다.
  * 그래서 필드 이름은 바꾸지 않고, 값만 다듬어(공백·좌표·날짜) 앱이 쓰는 필드만 남긴다.
- * 원본에 없는 필드는 binId 하나뿐이다.
+ * 원본에 없는 필드는 binId 와, 보조 파일데이터에서 온 행에만 붙는 fileDataId 둘이다.
  */
 import { createHash } from "node:crypto";
 
@@ -14,7 +14,10 @@ export const SOURCE_URL = "https://www.data.go.kr/data/15129445/standard.do";
 /** 표준데이터 API의 numOfRows 최대값. 7,696건(2026-10)이 8쪽이다. */
 export const MAX_ROWS = 1000;
 
-/** 앱의 toBin()이 읽는 필드. 이름은 2026-10-13 실제 API 응답 그대로다(제공기관은 insttCode·insttNm). */
+/**
+ * 앱의 toBin()이 읽는 필드. 이름은 2026-10-13 실제 API 응답 그대로다(제공기관은 insttCode·insttNm).
+ * fileDataId 는 표준데이터가 아닌 지자체 파일데이터(SUPPLEMENTS)에서 온 행의 데이터 번호다. 앱이 출처·오류 신고 링크에 쓴다.
+ */
 export const BIN_FIELDS = [
   "binId",
   "instlPlcNm",
@@ -29,7 +32,8 @@ export const BIN_FIELDS = [
   "mngInstTelno",
   "crtrYmd",
   "insttCode",
-  "insttNm"
+  "insttNm",
+  "fileDataId"
 ];
 
 /** 포털에서 내려받은 표준데이터 파일(JSON·CSV)의 한글 열 이름 → API 필드명. */
@@ -233,6 +237,106 @@ export function parseStandardFile(text) {
     .map((cells) => fromStandardRecord(Object.fromEntries(header.map((name, index) => [name, cells[index] ?? ""]))));
 }
 
+/**
+ * 표준데이터에 없는 지자체가 공공데이터포털에 따로 올린 폐의약품 수거함 파일데이터.
+ * 표준데이터에 그 시·군·구가 생기면 표준데이터를 쓰고 이 파일은 건너뛴다(mergeSupplements, ‘covered’).
+ * 지자체가 파일을 해마다 새로 올리면 다운로드 주소(atchFileId)가 바뀌어, 빌드할 때마다 데이터 페이지에서 지금 주소를 찾는다.
+ * 좌표가 없어 앱의 지역 선택과 ‘내 주변’ 목록 뒤쪽(위치 정보 없음)에 나오고, 지도는 주소로 찾는다.
+ * columns 는 파일의 열 이름 → 스냅샷 필드다. 열 이름이 바뀌면 빌드가 이 출처만 직전 배포본으로 대신한다.
+ *
+ * 2026-10-14 카탈로그에서 ‘폐의약품’ 파일데이터를 찾아본 결과 울산은 북구 파일만 있었다(남구·중구·울주군은 파일도 없음).
+ * insttCode 는 행정표준기관코드(울산 동구 3710000, 북구 3720000)로, 수거함 id(binIdentity)에 들어간다.
+ */
+export const SUPPLEMENTS = [
+  {
+    fileDataId: "15168452",
+    title: "울산광역시 북구_폐의약품 수거함 위치",
+    ctpvNm: "울산광역시",
+    sggNm: "북구",
+    insttCode: "3720000",
+    insttNm: "울산광역시 북구",
+    columns: {
+      수거지명: "instlPlcNm",
+      주소: "lctnRoadNm",
+      세부위치: "actlPstn",
+      전화번호: "mngInstTelno",
+      관리기관명: "mngInstNm",
+      데이터기준일: "crtrYmd"
+    }
+  }
+];
+
+export function fileDataPageUrl(fileDataId) {
+  return `https://www.data.go.kr/data/${fileDataId}/fileData.do`;
+}
+
+/** 파일데이터 페이지 HTML에서 지금 올라와 있는 파일의 다운로드 주소. 못 찾으면 "". */
+export function findFileDownloadUrl(html) {
+  const match = String(html ?? "").match(/atchFileId=(FILE_\d+)&(?:amp;)?fileDetailSn=(\d+)/);
+  return match
+    ? `https://www.data.go.kr/cmm/cmm/fileDownload.do?atchFileId=${match[1]}&fileDetailSn=${match[2]}&insertDataPrcus=N`
+    : "";
+}
+
+/**
+ * 보조 파일(CSV)을 원본 API 행 모양으로 바꾼다. 시도·시군구·제공기관은 파일에 없어 SUPPLEMENTS 설정으로 채운다.
+ * 정한 열이 하나라도 없으면 던진다. 지자체가 파일 형식을 바꾼 것이라 잘못 읽느니 직전 배포본을 쓰는 편이 낫다.
+ */
+export function parseSupplementFile(source, text) {
+  const [header = [], ...rows] = parseCsv(String(text ?? "").replace(/^\uFEFF/, "").trim());
+  const names = header.map((name) => cleanText(name));
+  const missing = Object.keys(source.columns).filter((column) => !names.includes(column));
+  if (missing.length > 0) {
+    throw new Error(`${source.title}: 열이 없습니다(${missing.join(", ")})`);
+  }
+  return rows
+    .filter((cells) => cells.some((cell) => cell.trim() !== ""))
+    .map((cells) => {
+      const row = {
+        ctpvNm: source.ctpvNm,
+        sggNm: source.sggNm,
+        insttCode: source.insttCode,
+        insttNm: source.insttNm,
+        fileDataId: source.fileDataId
+      };
+      for (const [column, field] of Object.entries(source.columns)) {
+        row[field] = cells[names.indexOf(column)] ?? "";
+      }
+      return row;
+    });
+}
+
+/**
+ * 표준데이터 행에 보조 파일 행을 붙인다. supplements 는 [{source, rows, status}]이고 status 는
+ * fetched(새로 받음)·previous(못 받아 직전 배포본 사용)·failed(둘 다 없음)다.
+ * 표준데이터에 이미 그 시·군·구가 있으면 그 파일은 쓰지 않는다(covered). report 는 meta.supplements 가 된다.
+ */
+export function mergeSupplements(standardRows, supplements) {
+  const covered = new Set(standardRows.map((raw) => {
+    const { row, sidoCode } = normalizeRow(raw);
+    return `${sidoCode}:${row.sggNm ?? ""}`;
+  }));
+  const rows = [...standardRows];
+  const report = [];
+  for (const { source, rows: extra, status } of supplements) {
+    const sidoCode = resolveSidoCode(source);
+    const isCovered = covered.has(`${sidoCode}:${source.sggNm}`);
+    const used = !isCovered && status !== "failed";
+    if (used) {
+      rows.push(...extra);
+    }
+    report.push({
+      fileDataId: source.fileDataId,
+      title: source.title,
+      sidoCode,
+      district: source.sggNm,
+      status: isCovered ? "covered" : status,
+      rows: used ? extra.length : 0
+    });
+  }
+  return { rows, report };
+}
+
 /** RFC 4180 CSV. 따옴표 안의 쉼표·줄바꿈과 "" 이스케이프를 처리한다. */
 export function parseCsv(text) {
   const rows = [];
@@ -408,7 +512,7 @@ export function binIdentity(row) {
 /** 원본 한 행을 스냅샷 행으로 다듬는다. 빈 값은 빼고, 좌표가 틀리면 lat/lot을 뺀다. */
 export function normalizeRow(raw) {
   const row = {};
-  for (const field of ["instlPlcNm", "ctpvNm", "lctnRoadNm", "lctnLotnoAddr", "actlPstn", "mngInstNm", "mngInstTelno", "insttCode", "insttNm"]) {
+  for (const field of ["instlPlcNm", "ctpvNm", "lctnRoadNm", "lctnLotnoAddr", "actlPstn", "mngInstNm", "mngInstTelno", "insttCode", "insttNm", "fileDataId"]) {
     const value = cleanText(raw?.[field]);
     if (value) {
       row[field] = value;
@@ -606,7 +710,7 @@ export function latestDataDate(bySido) {
   return latest;
 }
 
-export function buildMeta(bySido, stats, { generatedAt, sourceMode }) {
+export function buildMeta(bySido, stats, { generatedAt, sourceMode, supplements = [] }) {
   const sidos = {};
   let count = 0;
   let withCoordinates = 0;
@@ -621,6 +725,7 @@ export function buildMeta(bySido, stats, { generatedAt, sourceMode }) {
     generatedAt,
     source: SOURCE_URL,
     sourceMode,
+    supplements,
     contentHash: contentHash(bySido),
     bins: {
       count,
