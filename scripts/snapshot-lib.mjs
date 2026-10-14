@@ -312,6 +312,15 @@ export function resolveSidoCode(row) {
 /** 시군구가 없는 세종은 원본 시군구명이 이 값이다(2026-10, 231건). 앱의 시·군·구 목록에 ‘없음’이 뜨지 않게 빈 값으로 본다. */
 const NO_DISTRICT = "없음";
 
+/**
+ * 행정구역 개편으로 없어졌지만 원본 시군구명에 남은 이름 → 지금 이름. 키는 `시도코드:옛 이름`.
+ * 앱은 행정안전부 시·군·구 목록으로 ‘데이터 없음’을 보여 주므로, 옛 이름이 남으면 새 구 주민에게 수거함이 없다고 잘못 보인다.
+ * 2026-07-01 인천 개편으로 동구 전체가 제물포구가 됐다(2026-10 원본 21건, 제공기관은 이미 ‘인천광역시 제물포구’).
+ * 중구(제물포구·영종구로 나뉨)·서구(서해구·검단구로 나뉨)는 이름만으로 새 구를 정할 수 없어 두지 않는다.
+ * 주소는 원본 그대로 둔다. 앱 테스트가 새 이름이 앱의 시·군·구 목록에 있는지 확인한다.
+ */
+export const RENAMED_DISTRICTS = new Map([["28:동구", "제물포구"]]);
+
 /** 시군구명이 비어 있으면 주소의 두 번째 낱말(…시·군·구)로 채운다. 세종처럼 시군구가 없으면 "". */
 export function resolveDistrict(row) {
   const district = cleanText(row?.sggNm);
@@ -405,9 +414,10 @@ export function normalizeRow(raw) {
       row[field] = value;
     }
   }
+  const sidoCode = resolveSidoCode(row);
   const district = resolveDistrict(raw);
   if (district) {
-    row.sggNm = district;
+    row.sggNm = RENAMED_DISTRICTS.get(`${sidoCode}:${district}`) ?? district;
   }
   const date = normalizeDate(raw?.crtrYmd);
   if (date) {
@@ -418,7 +428,7 @@ export function normalizeRow(raw) {
     row.lat = coordinates.lat;
     row.lot = coordinates.lon;
   }
-  return { row, sidoCode: resolveSidoCode(row), swapped: coordinates?.swapped === true, invalidCoordinates: !coordinates };
+  return { row, sidoCode, swapped: coordinates?.swapped === true, invalidCoordinates: !coordinates };
 }
 
 /** 위도 1도의 길이(m). 수십 km 안의 거리 비교라 평면 근사로 충분하다. */

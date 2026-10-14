@@ -242,6 +242,19 @@ describe("groupBinsBySido", () => {
     assert.equal(typeof bySido.get("31")[0].lat, "number");
   });
 
+  it("개편으로 없어진 시군구명은 지금 이름으로 바꾸고 주소는 그대로 둔다(인천 동구 → 제물포구)", () => {
+    const incheon = { ctpvNm: "인천광역시", sggNm: "동구", lctnRoadNm: "인천광역시 동구 송림로 1", insttNm: "인천광역시 제물포구" };
+    const { bySido } = groupBinsBySido([
+      apiRow({ ...incheon, instlPlcNm: "송림동 행정복지센터" }),
+      apiRow({ ...incheon, instlPlcNm: "동구 주민센터", sggNm: "" }),
+      // 다른 시도의 동구는 그대로다.
+      apiRow({ instlPlcNm: "방어동 행정복지센터", sggNm: "동구", lctnRoadNm: "울산광역시 동구 방어로 1" })
+    ]);
+    assert.deepEqual(bySido.get("28").map((item) => item.sggNm), ["제물포구", "제물포구"]);
+    assert.equal(bySido.get("28")[0].lctnRoadNm, "인천광역시 동구 송림로 1");
+    assert.equal(bySido.get("31")[0].sggNm, "동구");
+  });
+
   it("빈 필드는 빼고 앱이 읽는 필드 순서로 둔다", () => {
     const [item] = groupBinsBySido([apiRow({ lctnLotnoAddr: "  ", extra: "버림" })]).bySido.get("31");
     assert.deepEqual(Object.keys(item), [
